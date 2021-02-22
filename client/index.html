@@ -3,8 +3,280 @@
 <head>
     <meta charset="UTF-8">
     <title>Title</title>
+    <style>
+        html, body {
+            width: 100%;
+            height: 100%;
+        }
+
+        body {
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+        }
+
+        #start {
+            width: 100px;
+            height: 50px;
+            font-size: 20px;
+        }
+
+        video {
+            margin: 5px;
+            object-fit: contain;
+            width: 854px;
+            height: 480px;
+            border: black solid 1px;
+        }
+
+    </style>
 </head>
 <body>
+<button id="start">Start</button>
+<video autoplay id="local"></video>
+<video autoplay id="remote"></video>
 
+<script>
+    const OPEN = 1;
+
+    const SIGNALING = 'SIGNALING'
+    const LOG = 'LOG'
+
+    const localVideo = document.querySelector('#local');
+    const remoteVideo = document.querySelector('#remote');
+    const btnStart = document.querySelector('#start');
+
+    let localStream;
+    let peerConnection = null;
+
+    const socket = new WebSocket('ws://localhost:8080/socket');
+
+    const displayMediaOptions = {
+        video: {
+            width: 1600,
+            height: 900,
+            frameRate: 24
+        },
+        audio: false
+    }
+
+    const send = (kind, data) => {
+        socket.send(JSON.stringify({
+            kind, data
+        }))
+    }
+
+    const log = msg => {
+        console.log(msg)
+        if (socket.readyState === OPEN) {
+            send(LOG, msg)
+        }
+    }
+
+    const signal = msg => {
+        send(SIGNALING, msg)
+    }
+
+    const createPeerConnection = () => {
+        const configuration = {
+            'iceServers': [
+                {'urls': 'stun:stun.stunprotocol.org:3478'},
+                {'urls': 'stun:stun.l.google.com:19302'},
+            ]
+        };
+        const peerConnection = new RTCPeerConnection(configuration);
+        // peerConnection.onnegotiationneeded = async () => {
+        //     const offer = await peerConnection.createOffer()
+        //     await peerConnection.setLocalDescription(offer)
+        //     signal({
+        //         type: 'offer',
+        //         sdp: peerConnection.localDescription
+        //     })
+        //     log('Negotiation Needed Event: SDP offer sent');
+        // }
+        peerConnection.onicecandidate = event => {
+            if (event.candidate) {
+                signal({
+                    type: 'ice',
+                    candidate: event.candidate
+                })
+                log('ICE Candidate Event: ICE candidate sent');
+            } else {
+                log('ICE Candidate Event else: ' + JSON.stringify(event));
+            }
+        }
+        peerConnection.ontrack = event => {
+            log("Add track : " + JSON.stringify(event))
+            remoteVideo.srcObject = event.streams[0]
+            remoteVideo.play()
+        }
+        peerConnection.onsignalingstatechange = event => {
+            log("Signaling state: " + JSON.stringify(event))
+        }
+        peerConnection.addEventListener('connectionstatechange', event => {
+            if (peerConnection.connectionState === 'connected') {
+                log("Connection established")
+            }
+        })
+        return peerConnection;
+    }
+
+    socket.onopen = () => {
+        log('Open socket')
+    }
+
+    const getLocalMediaStream = mediaStream => {
+        localStream = mediaStream;
+        localVideo.srcObject = mediaStream;
+        localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
+    }
+
+    const getMedia = async (options) => {
+        if (localStream) {
+            localStream.getTracks().forEach(track => {
+                track.stop();
+            });
+        }
+        const stream = await navigator.mediaDevices.getDisplayMedia(options)
+        getLocalMediaStream(stream)
+    }
+
+    socket.onmessage = async msg => {
+        console.log(msg)
+        const message = JSON.parse(msg.data);
+        switch (message.type) {
+            case 'offer': {
+                log('Accepting Offer Message');
+                const desc = new RTCSessionDescription(message.sdp);
+                log('RTC Signalling state: ' + peerConnection.signalingState);
+                await peerConnection.setRemoteDescription(desc)
+                const stream = await navigator.mediaDevices.getDisplayMedia(displayMediaOptions)
+                localStream = stream;
+                localVideo.srcObject = localStream
+                localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
+                const answer = await peerConnection.createAnswer()
+                await peerConnection.setLocalDescription(answer)
+                log("Sending answer packet back to other peer");
+                signal({
+                    type: 'answer',
+                    sdp: peerConnection.localDescription
+                })
+                break;
+            }
+            case 'answer': {
+                log("The peer has accepted request");
+                await peerConnection.setRemoteDescription(message.sdp)
+                break;
+            }
+            case 'ice': {
+                const candidate = new RTCIceCandidate(message.candidate);
+                log("Adding received ICE candidate: " + JSON.stringify(candidate));
+                await peerConnection.addIceCandidate(candidate);
+                break;
+            }
+        }
+    }
+
+
+    // peerConnection.addEventListener('track', async (event) => {
+    //     log("Add track: " + JSON.stringify(event))
+    //     const remoteStream = new MediaStream();
+    //     remoteVideo.srcObject = remoteStream;
+    //     remoteStream.addTrack(event.track);
+    // });
+
+    // const initLocalStream = async () => {
+    //     localStream = await navigator.mediaDevices.getDisplayMedia(displayMediaOptions)
+    //     localVideo.srcObject = localStream;
+    //     log('Init local stream')
+    //     addLocalStreamTracksToConnection()
+    //     localVideo.play();
+    // }
+    //
+    // const addLocalStreamTracksToConnection = () => {
+    //     localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
+    // }
+
+    const start = async () => {
+        await getMedia(displayMediaOptions);
+        const offer = await peerConnection.createOffer()
+        await peerConnection.setLocalDescription(offer)
+        signal({
+            type: 'offer',
+            sdp: peerConnection.localDescription
+        })
+        log("Send offer")
+    }
+
+    //
+    //
+    // socket.onmessage = async event => {
+    //     const message = JSON.parse(event.data)
+    //     if (message.answer) {
+    //         log("Answer")
+    //         log(message)
+    //         const remoteDesc = new RTCSessionDescription(message.answer);
+    //         await peerConnection.setRemoteDescription(remoteDesc);
+    //         return;
+    //     }
+    //     if (message.offer) {
+    //         log("Offer")
+    //         log(message)
+    //         const sessionDescription = new RTCSessionDescription(message.offer)
+    //         await peerConnection.setRemoteDescription(sessionDescription);
+    //         const answer = await peerConnection.createAnswer();
+    //         await peerConnection.setLocalDescription(answer);
+    //         send({'answer': answer});
+    //         return;
+    //     }
+    //     if (message.iceCandidate) {
+    //         log("Ice candidate message")
+    //         log(message)
+    //         try {
+    //             await peerConnection.addIceCandidate(message.iceCandidate);
+    //         } catch (e) {
+    //             console.error('Error adding received ice candidate', e);
+    //         }
+    //     }
+    // }
+    // const handleNegotiationNeededEvent = async () => {
+    //     const offer = await myPeerConnection.createOffer()
+    //     await peerConnection.setLocalDescription(offer)
+    //     send({'offer': offer});
+    //     log('Negotiation Needed Event: SDP offer sent');
+    //     // sendToServer({
+    //     //     from: localUserName,
+    //     //     type: 'offer',
+    //     //     sdp: myPeerConnection.localDescription
+    //     // });log('Negotiation Needed Event: SDP offer sent');
+    //
+    // }
+    // peerConnection.onnegotiationneeded = handleNegotiationNeededEvent;
+    // peerConnection.addEventListener('icecandidate', event => {
+    //     log("Ice candidate event")
+    //     log(event)
+    //     if (event.candidate) {
+    //         send({'iceCandidate': event.candidate})
+    //     }
+    // });
+    // peerConnection.addEventListener('connectionstatechange', event => {
+    //     log('Connection established')
+    //     if (peerConnection.connectionState === 'connected') {
+    //         localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
+    //     }
+    // });
+    //
+    // const handleTrackEvent = event => {
+    //     log("Track event")
+    //     remoteVideo.srcObject = event.streams[0];
+    // }
+    //
+    // peerConnection.ontrack = handleTrackEvent
+    //
+
+    btnStart.addEventListener('click', start)
+    peerConnection = createPeerConnection();
+</script>
 </body>
 </html>
